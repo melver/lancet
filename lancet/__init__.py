@@ -58,8 +58,6 @@ import numpy as np
 import itertools
 from collections import defaultdict
 
-# Local hack to make use of submodule version (when available)
-sys.path = [os.path.join(os.path.abspath('.'),'param')] + sys.path
 import param
 
 #=====================#
@@ -165,7 +163,7 @@ class BaseArgs(param.Parameterized):
         """
         raise NotImplementedError
 
-    def next(self):
+    def __next__(self):
         """
         Called to get a list of specifications: dictionaries with parameter name
         keys and string values.
@@ -297,7 +295,7 @@ class BaseArgs(param.Parameterized):
             self.show()
             response =  None
             while response not in ['y','N', '']:
-                response = raw_input('Continue? [y, N]: ')
+                response = input('Continue? [y, N]: ')
             if response != 'y': return False
 
         return log_file
@@ -380,7 +378,7 @@ class StaticArgs(BaseArgs):
         self._exhausted = False
         return self
 
-    def next(self):
+    def __next__(self):
         if self._exhausted:
             raise StopIteration
         else:
@@ -606,7 +604,7 @@ class DynamicConcatenate(BaseArgs):
         if (self.first.dynamic and not self._exhausted): self.first.update(data)
         elif (self.second.dynamic and self._first_sent): self.second.update(data)
 
-    def next(self):
+    def __next__(self):
         if self._first_cached is None:
             try:  return next(self.first)
             except StopIteration:
@@ -663,7 +661,7 @@ class DynamicCartesianProduct(BaseArgs):
             if second_schedule is None: return None
             return [len(self._first_cached)*i for i in second_schedule]
 
-    def next(self):
+    def __next__(self):
         if self._first_cached is None:
             first_spec = next(self.first)
             return self._cartesian_product(first_spec, self._second_cached)
@@ -1379,7 +1377,7 @@ class review_and_launch(param.Parameterized):
         """
         check_options = [x.lower() for x in options]
         while True:
-            response = raw_input('%s [%s]: ' % (prompt, ', '.join(options))).lower()
+            response = input('%s [%s]: ' % (prompt, ', '.join(options))).lower()
             if response in check_options: return response.strip()
             elif response == '' and default is not None:
                 return default.lower().strip()
@@ -1479,7 +1477,7 @@ class review_and_launch(param.Parameterized):
         tag = '<No tag>' if launcher.tag == '' else launcher.tag
         print("Description: %s" % description)
         print("Tag: %s" % tag)
-        print
+        print()
         return True
 
     def review_args(self, obj, heading='Argument Specification'):
@@ -1501,7 +1499,7 @@ class review_and_launch(param.Parameterized):
                 '\nShow available argument specifier entries?', default='y')
         if response == 'quit': return False
         if response == 'y':  arg_specifier.show()
-        print
+        print()
         return True
 
     def review_command_template(self, launcher):
@@ -1519,8 +1517,8 @@ class review_and_launch(param.Parameterized):
         if response == 'y':
             command_template.show(arg_specifier)
         if response == 'save':
-            fname = raw_input('Filename: ').replace(' ','_')
+            fname = input('Filename: ').replace(' ','_')
             with open(os.path.abspath(fname),'w') as f:
                 command_template.show(arg_specifier, file_handle=f)
-        print
+        print()
         return True
