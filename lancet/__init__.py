@@ -60,6 +60,10 @@ from collections import defaultdict
 
 import param
 
+float_types = [float] + np.sctypes['float']
+def identityfn(x): return x
+def fp_repr(x):    return str(x) if (type(x) in float_types) else repr(x)
+
 #=====================#
 # Argument Specifiers #
 #=====================#
@@ -110,32 +114,13 @@ class BaseArgs(param.Parameterized):
          you only want to display up to the precision actually specified.''')
 
     def __init__(self,   **params):
-        self.format_map = defaultdict(dict)
         super(BaseArgs,self).__init__(**params)
 
     def __iter__(self): return self
 
-    def _float_format(self, key, precision):
-        assert key not in self.format_map, 'Floating format already set for key'
-        self._object_format(key, tuple([float]+np.sctypes['float']), '%%0.%df' % precision)
-
-    def _object_format(self, key, type_tuple, format):
-        assert key not in self.format_map, 'Key already in the format map'
-        self.format_map[key].update({type_tuple:format})
-
-    def _formatter(self, key, value):
-        " Helper function that helps format Python objects appropriately "
-
-        if (key in self.format_map):
-            for type_group in self.format_map[key]:
-                if type(value) in type_group:
-                    return self.format_map[key][type_group] % value
-        elif type(value) in [float]+np.sctypes['float']: # Default behaviour for floats
-            return ('%%0.%df' % self.fp_precision) % value
-        return str(value)
-
     def spec_formatter(self, spec):
-        return dict((k,self._formatter(k, v)) for (k,v) in spec.items())
+        " Formats the elements of an argument set appropriately"
+        return dict((k, str(v)) for (k,v) in spec.items())
 
     def constant_keys(self):
         """
@@ -153,6 +138,11 @@ class BaseArgs(param.Parameterized):
         groups that vary at the same rate.
         """
         raise NotImplementedError
+
+    def round_floats(self, specs, fp_precision):
+        _round = lambda v, fp: np.round(v, fp) if (type(v) in np.sctypes['float']) else round(v, fp)
+        return (dict((k, _round(v, fp_precision) if (type(v) in float_types) else v)
+                     for (k,v) in spec.items()) for spec in specs)
 
     def __next__(self):
         """
@@ -361,8 +351,8 @@ class StaticArgs(BaseArgs):
             szipped = [(i, dict((str(k),v) for (k,v) in d.items())) for (i,d) in uzipped]
         return dict(szipped)
 
-    def __init__(self, specs, **kwargs):
-        self._specs = list(specs)
+    def __init__(self, specs, fp_precision=4, **kwargs):
+        self._specs = list(self.round_floats(specs, fp_precision))
         super(StaticArgs, self).__init__(dynamic=False, **kwargs)
 
     def __iter__(self):
@@ -421,12 +411,8 @@ class StaticConcatenate(StaticArgs):
 
         self.first = first
         self.second = second
-
         specs = list(first.copy()(review=False)) + list(second.copy()(review=False))
-
         super(StaticConcatenate, self).__init__(specs)
-        merged_format_map = dict(first.format_map, **second.format_map) # FIXME! Max of fp_precision!
-        self.format_map = defaultdict(dict, merged_format_map)          # Method in base class?
 
     def __repr__(self):
         return "(%s + %s)" % (repr(self.first), repr(self.second))
@@ -449,10 +435,7 @@ class StaticCartesianProduct(StaticArgs):
         overlap = (set(self.first.varying_keys() + self.first.constant_keys())
                    &  set(self.second.varying_keys() + self.second.constant_keys()))
         assert overlap == set(), 'Sets of keys cannot overlap between argument specifiers in cartesian product.'
-
         super(StaticCartesianProduct, self).__init__(specs)
-        merged_format_map = dict(first.format_map, **second.format_map)
-        self.format_map = defaultdict(dict, merged_format_map)
 
     def __repr__(self):   return '(%s * %s)' % (repr(self.first), repr(self.second))
 
@@ -464,19 +447,16 @@ class Args(StaticArgs):
     product.
     """
 
-    def __init__(self, fp_precision=4, **kwargs):
+    def __init__(self, **kwargs):
         assert kwargs != {}, "Empty specification not allowed."
+        fp_precision = kwargs.pop('fp_precision') if ('fp_precision' in kwargs) else 4
         specs = [dict((k, kwargs[k]) for k in kwargs)]
         super(Args,self).__init__(specs, fp_precision=fp_precision)
-        for key in specs[0]:
-            self._float_format(key, fp_precision)
 
     def __repr__(self):
         spec = self._specs[0]
-        return "Args(%s)"  % ', '.join(['%s=%s' % (k, self._formatter(k, spec[k])) for k in spec])
+        return "Args(%s)"  % ', '.join(['%s=%s' % (k, fp_repr(v)) for (k,v) in spec.items()])
 
-
-def identityfn(x): return x
 
 class LinearArgs(StaticArgs):
     """
@@ -502,25 +482,22 @@ class LinearArgs(StaticArgs):
          The function to be mapped across the linear range. Identity  by default ''')
 
     def __init__(self, arg_name, value, end_value=None,
-                 steps=2, fp_precision=4, mapfn=identityfn):
+                 steps=1, mapfn=identityfn, **kwargs):
 
         if end_value is not None:
             values = np.linspace(value, end_value, steps, endpoint=True)
-            _specs = [{arg_name:mapfn(val)} for val in values ]
+            specs = [{arg_name:mapfn(val)} for val in values ]
         else:
-            _specs = [{arg_name:mapfn(value)}]
+            specs = [{arg_name:mapfn(value)}]
         self._pparams = ['end_value', 'steps', 'fp_precision', 'mapfn']
 
-        super(LinearArgs, self).__init__(_specs, arg_name=arg_name, value=value,
-                                          end_value=end_value, steps=steps,
-                                          fp_precision=fp_precision,
-                                          mapfn=mapfn)
-
-        self._float_format(arg_name, fp_precision)
+        super(LinearArgs, self).__init__(specs, arg_name=arg_name, value=value,
+                                         end_value=end_value, steps=steps,
+                                         mapfn=mapfn, **kwargs)
 
     def __repr__(self):
         modified = dict(self.get_param_values(onlychanged=True))
-        pstr = ', '.join(['%s=%s' % (k,self._formatter(k,modified[k])) for k in self._pparams if k in modified])
+        pstr = ', '.join(['%s=%s' % (k, modified[k]) for k in self._pparams if k in modified])
         return "%s('%s', %s, %s)" % (self.__class__.__name__, self.arg_name, self.value, pstr)
 
 class ListArgs(StaticArgs):
@@ -531,17 +508,13 @@ class ListArgs(StaticArgs):
     arg_name = param.String(default='default',doc='''
          The key name that take its values from the given list.''')
 
-    def __init__(self, arg_name, value_list, fp_precision=4):
+    def __init__(self, arg_name, value_list, **kwargs):
 
-        self._value_list = value_list
-        _specs = [ {arg_name:val} for val in value_list]
-        super(ListArgs, self).__init__(_specs, arg_name=arg_name,
-                                        fp_precision=fp_precision)
-
-        self._float_format(arg_name, fp_precision)
+        specs = [ {arg_name:val} for val in value_list]
+        super(ListArgs, self).__init__(specs, arg_name=arg_name, **kwargs)
 
     def __repr__(self):
-        value_list = [self._formatter(self.arg_name, val) for val in self._value_list]
+        value_list = (fp_repr(spec[self.arg_name]) for spec in self._specs)
         return "%s('%s',[%s])" % (self.__class__.__name__, self.arg_name, ', '.join(value_list))
 
 #=============================#
