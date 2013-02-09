@@ -50,17 +50,24 @@ review of all settings specified before launch. The goal is to help users
 identify mistakes early before consuming computational time and resources.
 """
 
-import os, sys, copy, re, glob, json, pickle, fnmatch
-import time, pipes, subprocess
+import os, sys, time, pipes, subprocess, itertools, copy
+import re, glob, fnmatch, string, re
+import json, pickle
 import logging
 
-import numpy as np
-import itertools
+import param
+try:
+    import numpy as np
+    np_ftypes = np.sctypes['float']
+except:
+    np, np_ftypes = None, []
+
 from collections import defaultdict
 
-import param
+try:    import IPython
+except: IPython = None
 
-float_types = [float] + np.sctypes['float']
+float_types = [float] + np_ftypes
 def identityfn(x): return x
 def fp_repr(x):    return str(x) if (type(x) in float_types) else repr(x)
 
@@ -121,8 +128,13 @@ class BaseArgs(param.Parameterized):
 
     def __init__(self,   **params):
         super(BaseArgs,self).__init__(**params)
+        self._pprint_args = ([],[],None,{})
+        self.pprint_args([],['fp_precision', 'dynamic'])
 
     def __iter__(self): return self
+
+    def __contains__(self, value):
+        return value in (self.constant_keys() +  self.constant_keys())
 
     def spec_formatter(self, spec):
         " Formats the elements of an argument set appropriately"
@@ -131,17 +143,16 @@ class BaseArgs(param.Parameterized):
     def constant_keys(self):
         """
         Returns the list of parameter names whose values are constant as the
-        argument specifier is iterated.  Note that constant_keys() +
-        varying_keys() should span the entire set of keys.
+        argument specifier is iterated.  Note that the union of constant and
+        varying_keys should partition the entire set of keys.
         """
         raise NotImplementedError
 
     def constant_items(self):
         """
-        Returns the set of constant items as a list of tuples. This
-        allows easy conversion to dictionary format. Note, the items
-        should be supplied in the same key ordering as for
-        constant_keys() for consistency.
+        Returns the set of constant items as a list of tuples. This allows easy
+        conversion to dictionary format. Note, the items should be supplied in
+        the same key ordering as for constant_keys() for consistency.
         """
         raise NotImplementedError
 
@@ -155,7 +166,7 @@ class BaseArgs(param.Parameterized):
         raise NotImplementedError
 
     def round_floats(self, specs, fp_precision):
-        _round = lambda v, fp: np.round(v, fp) if (type(v) in np.sctypes['float']) else round(v, fp)
+        _round = lambda v, fp: np.round(v, fp) if (type(v) in np_ftypes) else round(v, fp)
         return (dict((k, _round(v, fp_precision) if (type(v) in float_types) else v)
                      for (k,v) in spec.items()) for spec in specs)
 
@@ -210,26 +221,17 @@ class BaseArgs(param.Parameterized):
         human-readable format. When dynamic, not all argument values may be
         available.
         """
-
         copied = self.copy()
         enumerated = [el for el in enumerate(copied)]
         for (group_ind, specs) in enumerated:
             if len(enumerated) > 1: print("Group %d" % group_ind)
             ordering = self.constant_keys() + self.varying_keys()
             # Ordered nicely by varying_keys definition.
-            spec_lines = [ ', '.join(['%s=%s' % (k, s[k]) for k in ordering]) for s in specs]
-            print('\n'.join([ '%d: %s' % (i,l) for (i,l) in enumerate(spec_lines)]))
+            spec_lines = [', '.join(['%s=%s' % (k, s[k]) for k in ordering]) for s in specs]
+            print('\n'.join(['%d: %s' % (i,l) for (i,l) in enumerate(spec_lines)]))
 
         if self.dynamic:
             print('Remaining arguments not available for %s' % self.__class__.__name__)
-
-    def __str__(self):
-        """
-        Argument specifiers are expected to have a succinct representation that
-        is both human-readable but correctly functions as a proper object
-        representation ie. repr.
-        """
-        return repr(self)
 
     def __add__(self, other):
         """
@@ -273,79 +275,55 @@ class BaseArgs(param.Parameterized):
                       ))
                  for s1 in first_specs for s2 in second_specs ]
 
-    def _args_kwargs(self, spec, args):
+    def pprint_args(self, pos_args, keyword_args, infix_operator=None, extra_params={}):
         """
-        Separates out args from kwargs given a list of non-kwarg arguments. When
-         args list is empty, kwargs alone are returned.
+        Method to define the positional arguments and keyword order for pretty printing.
         """
-        if args ==[]: return spec
-        arg_list = [v for (k,v) in spec.items() if k in args]
-        kwarg_dict = dict((k,v) for (k,v) in spec.items() if (k not in args))
-        return (arg_list, kwarg_dict)
+        if infix_operator and not (len(pos_args)==2 and keyword_args==[]):
+            raise Exception('Infix format requires exactly two positional arguments and no keywords')
+        (kwargs,_,_,_) = self._pprint_args
+        self._pprint_args = (keyword_args + kwargs, pos_args, infix_operator, extra_params)
 
-    def _setup_generator(self, args, review, log_file):
+    def _pprint(self, cycle=False, flat=False, annotate=False, level=1, tab = '   '):
         """
-        Basic setup before returning the arg-kwarg generator. Allows review and
-        logging to be consistent with other useage.
+        Pretty printer that prints only the modified keywords and generates flat
+        representations (for repr) and optionally annotates with a comment.
         """
-        all_keys =  self.constant_keys() + self.varying_keys()
-        assert set(args) <= set(all_keys), 'Specified args must belong to the set of keys'
+        (kwargs, pos_args, infix_operator, extra_params) = self._pprint_args
+        (br, indent)  = ('' if flat else '\n', '' if flat else tab * level)
+        prettify = lambda x: isinstance(x, BaseArgs) and not flat
+        pretty = lambda x: x._pprint(flat=flat, level=level+1) if prettify(x) else repr(x)
 
-        if review:
-            self.show()
-            response =  None
-            while response not in ['y','N', '']:
-                response = input('Continue? [y, N]: ')
-            if response != 'y': return False
+        params = dict(self.get_param_values())
+        modified = [k for (k,v) in self.get_param_values(onlychanged=True)]
+        pkwargs = [(k, params[k])  for k in kwargs if (k in modified)] + list(extra_params.items())
+        arg_list = [(k,params[k]) for k in pos_args] + pkwargs
 
-        if log_file is not None:
-            try: log_file = open(os.path.abspath(log_file), 'w')
-            except: raise Exception('Could not create log file at log_path')
+        len_ckeys, len_vkeys = len(self.constant_keys()), len(self.varying_keys())
+        info_triple = (len(self),
+                       ', %d constant key(s)' % len_ckeys if len_ckeys else '',
+                       ', %d varying key(s)'  % len_vkeys if len_vkeys else '')
+        annotation = '# == %d items%s%s ==\n' % info_triple
+        lines = [annotation] if annotate else []    # Optional annotating comment
 
-        return log_file
+        if cycle:
+            lines.append('%s(...)' % self.__class__.__name__)
+        elif infix_operator:
+            level = level - 1
+            triple = (pretty(params[pos_args[0]]), infix_operator, pretty(params[pos_args[1]]))
+            lines.append('%s %s %s' % triple)
+        else:
+            lines.append('%s(' % self.__class__.__name__)
+            for (k,v) in arg_list:
+                lines.append('%s%s=%s' %  (br+indent, k, pretty(v)))
+                lines.append(',')
+            lines = lines[:-1] +[br+(tab*(level-1))+')'] # Remove trailing comma
 
-    def _write_log(self, log_file, specs, line_no):
-        """
-        Writes out a log file to the root directory consistent Launcher useage.
-        """
-        lines = ['%d %s\n' % (line_no+i, json.dumps(spec)) for (i, spec) in enumerate(specs)]
-        log_file.write('\n'.join(lines))
-        return line_no + len(specs)
+        return ''.join(lines)
 
-    def __call__(self, args=[], review=True, log_file=None):
-        """
-        A generator that allows argument specifiers to be used nicely with
-        Python. For static specifiers, the args and kwargs are returned directly
-        allowing iteration without unpacking. For dynamic specifiers, they are
-        returned as lists for each concurrent group. By default all parameters
-        are returned as kwargs but they can also returned as (args, kwargs) if
-        the the arg keys are specified.
-        """
-        log_file = self._setup_generator(args, review, log_file)
-        if log_file is False: return
-        accumulator = []
-        line_no = 0
-        spec_iter = iter(self)
-        while True:
-            if self.dynamic:
-                try:
-                    specs = next(spec_iter)
-                    retval = [self._args_kwargs(spec, args) for spec in specs]
-                except: break
-            if not self.dynamic and accumulator==[]:
-                try:
-                    accumulator = next(spec_iter)
-                except: break
-            if not self.dynamic:
-                specs = accumulator[:1]
-                retval = self._args_kwargs(specs[0], args)
-                accumulator=accumulator[1:]
-
-            if log_file is not None:
-                line_no = self._write_log(log_file, specs, line_no)
-            yield retval
-
-        if log_file is not None: log_file.close()
+    def _repr_pretty_(self, p, cycle):  p.text(self._pprint(cycle, annotate=True))
+    def __repr__(self):  return self._pprint(flat=True)
+    def __str__(self): return self._pprint()
 
 class StaticArgs(BaseArgs):
     """
@@ -358,26 +336,23 @@ class StaticArgs(BaseArgs):
     support for len().
     """
 
-    @staticmethod
-    def extract_log_specification(log_path, dict_type=dict):
-        """
-        Parses the log file generated by a launcher and returns the corresponding
-        tids and specification list. The specification list can be used to build a
-        valid StaticArgs object. Converts keys from unicode to string for use as kwargs.
+    HTML = param.Callable(default=str, doc='''
+           Callable to process HTML markup as returned by the 'html'
+           method.  Default behaviour is to return the markup as a
+           string but if set to the HTML class in IPython.display.,
+           specifiers will automatically displayed in tabular form in
+           IPython notebook when when the html method is called.''')
 
-        Allows ordered dictionaries by setting dict_type to an appropriate constructor.
-        e.g: s = StaticArgs(StaticArgs.extract_log_specification(<log_file>).values())
-        """
-        with open(log_path,'r') as log:
-            splits = (line.split() for line in log)
-            uzipped = ((int(split[0]), json.loads(" ".join(split[1:]))) for split in splits)
-            szipped = [(i, dict((str(k),v) for (k,v) in d.items())) for (i,d) in uzipped]
-        return dict_type(szipped)
+    specs = param.List(default=[], constant=True, doc='''
+          The static list of specifications (ie. dictionaries) to be
+          returned by the specifier. Float values are rounded to
+          fp_precision.''')
 
     def __init__(self, specs, fp_precision=None, **kwargs):
         if fp_precision is None: fp_precision = BaseArgs.fp_precision
-        self._specs = list(self.round_floats(specs, fp_precision))
-        super(StaticArgs, self).__init__(dynamic=False, fp_precision=fp_precision, **kwargs)
+        specs = list(self.round_floats(specs, fp_precision))
+        super(StaticArgs, self).__init__(dynamic=False, fp_precision=fp_precision, specs=specs, **kwargs)
+        self.pprint_args(['specs'],[])
 
     def __iter__(self):
         self._exhausted = False
@@ -388,7 +363,7 @@ class StaticArgs(BaseArgs):
             raise StopIteration
         else:
             self._exhausted=True
-            return self._specs
+            return self.specs
 
     def _unique(self, sequence, idfun=repr):
         """
@@ -401,30 +376,62 @@ class StaticArgs(BaseArgs):
                 if idfun(e) not in seen]
 
     def constant_keys(self):
-        collection = self._collect_by_key(self._specs)
+        collection = self._collect_by_key(self.specs)
         return [k for k in sorted(collection) if (len(self._unique(collection[k])) == 1)]
 
     def constant_items(self):
-        collection = self._collect_by_key(self._specs)
+        collection = self._collect_by_key(self.specs)
         return [(k,collection[k][0]) for k in self.constant_keys()]
 
     def varying_keys(self):
-        collection = self._collect_by_key(self._specs)
+        collection = self._collect_by_key(self.specs)
         constant_set = set(self.constant_keys())
         unordered_varying = set(collection.keys()).difference(constant_set)
         # Finding out how fast keys are varying
         grouplens = [(len([len(list(y)) for (_,y) in itertools.groupby(collection[k])]),k) for k in collection]
-        varying_counts = [ (n,k) for (n,k) in sorted(grouplens) if (k in unordered_varying)]
+        varying_counts = [(n,k) for (n,k) in sorted(grouplens) if (k in unordered_varying)]
         # Grouping keys with common frequency alphanumerically (desired behaviour).
         ddict = defaultdict(list)
         for (n,k) in varying_counts: ddict[n].append(k)
         alphagroups = [sorted(ddict[k]) for k in sorted(ddict)]
         return [el for group in alphagroups for el in group]
 
-    def __len__(self): return len(self._specs)
+    def _html_row(self, spec, columns):
+        row_strings = []
+        for value in [spec[col] for col in columns]:
+            html_repr = value.html(html_fn=str) if hasattr(value, 'html') else str(value)
+            row_strings.append('<td>'+html_repr+'</td>')
+        return ' '.join(['<tr>'] + row_strings + ['</tr>'])
 
-    def __repr__(self):
-        return "StaticArgs(%s)" % (self._specs)
+    def html(self, cols=None, html_fn=None, max_rows=None):
+        """
+        Generate a HTML table for the specifier.
+        """
+        html_fn = self.HTML if html_fn is None else html_fn
+        max_rows = len(self) if max_rows is None else max_rows
+        columns = self.varying_keys() if cols is None else cols
+
+        all_varying = self.varying_keys()
+        if not all(col in all_varying for col in columns):
+            raise Exception('Columns must belong to the varying keys')
+
+        summary = '<tr><td><b>%r<br>[%d items]</b></td></tr>' % (self.__class__.__name__, len(self))
+        cspecs = [{'Key':k, 'Value':v} for (k,v) in self.constant_items()]
+        crows = [self._html_row(spec, ['Key', 'Value']) for spec in cspecs]
+        cheader_str = '<tr><td><b>Constant Key</b></td><td><b>Value</b></td></tr>'
+
+        vrows = [self._html_row(spec,columns) for spec in self.specs[:max_rows]]
+        vheader_str= ' '.join(['<tr>'] + ['<td><b>'+str(col)+'</b></td>' for col in columns ] +['</tr>'])
+        ellipses = ' '.join(['<tr>'] + ['<td>...</td>' for col in columns ] +['</tr>'])
+        ellipse_str = ellipses  if (max_rows < len(self)) else ''
+
+        html_elements = ['<table>', summary, cheader_str] + crows + [vheader_str] + vrows + [ellipse_str, '</table>']
+        html = '\n'.join(html_elements)
+        return html_fn(html)
+
+    def __len__(self): return len(self.specs)
+
+    def _repr_pretty_(self, p, cycle): p.text(self._pprint(cycle, annotate=True))
 
 
 class StaticConcatenate(StaticArgs):
@@ -435,17 +442,21 @@ class StaticConcatenate(StaticArgs):
     second.
     """
 
+    first = param.ClassSelector(default=None, class_=StaticArgs, allow_None=True, constant=True, doc='''
+            The first static specifier used to generate the concatenation.''')
+
+    second = param.ClassSelector(default=None, class_=StaticArgs, allow_None=True, constant=True, doc='''
+            The second static specifier used to generate the concatenation.''')
+
     def __init__(self, first, second):
 
-        self.first = first
-        self.second = second
         max_precision = max(first.fp_precision, second.fp_precision)
+        specs = first.specs + second.specs
+        super(StaticConcatenate, self).__init__(specs, fp_precision=max_precision,
+                                                first=first, second=second)
+        self.pprint_args(['first', 'second'],[], infix_operator='+')
 
-        specs = list(first.copy()(review=False)) + list(second.copy()(review=False))
-        super(StaticConcatenate, self).__init__(specs, fp_precision=max_precision)
-
-    def __repr__(self):
-        return "(%s + %s)" % (repr(self.first), repr(self.second))
+    def _repr_pretty_(self, p, cycle): p.text(self._pprint(cycle, annotate=True))
 
 class StaticCartesianProduct(StaticArgs):
     """
@@ -454,21 +465,26 @@ class StaticCartesianProduct(StaticArgs):
     generates the cartesian produce of the arguments in first followed by the
     arguments in second. Note that len(first * second) = len(first)*len(second)
     """
+
+    first = param.ClassSelector(default=None, class_=StaticArgs, allow_None=True, constant=True, doc='''
+            The first static specifier used to generate the Cartesian product.''')
+
+    second = param.ClassSelector(default=None, class_=StaticArgs, allow_None=True, constant=True, doc='''
+            The second static specifier used to generate the Cartesian product.''')
+
     def __init__(self, first, second):
 
-        self.first = first
-        self.second = second
         max_precision = max(first.fp_precision, second.fp_precision)
+        specs = self._cartesian_product(first.specs, second.specs)
 
-        specs = self._cartesian_product(list(first.copy()(review=False)),
-                                        list(second.copy()(review=False)))
-
-        overlap = (set(self.first.varying_keys() + self.first.constant_keys())
-                   &  set(self.second.varying_keys() + self.second.constant_keys()))
+        overlap = (set(first.varying_keys() + first.constant_keys())
+                   &  set(second.varying_keys() + second.constant_keys()))
         assert overlap == set(), 'Sets of keys cannot overlap between argument specifiers in cartesian product.'
-        super(StaticCartesianProduct, self).__init__(specs, fp_precision=max_precision)
+        super(StaticCartesianProduct, self).__init__(specs, fp_precision=max_precision,
+                                                     first=first, second=second)
+        self.pprint_args(['first', 'second'],[], infix_operator='*')
 
-    def __repr__(self):   return '(%s * %s)' % (repr(self.first), repr(self.second))
+    def _repr_pretty_(self, p, cycle): p.text(self._pprint(cycle, annotate=True))
 
 
 class Args(StaticArgs):
@@ -480,74 +496,411 @@ class Args(StaticArgs):
 
     def __init__(self, **kwargs):
         assert kwargs != {}, "Empty specification not allowed."
-        fp_precision = kwargs.pop('fp_precision') if ('fp_precision' in kwargs) else BaseArgs.fp_precision
+        fp_precision = kwargs.pop('fp_precision') if ('fp_precision' in kwargs) else None
         specs = [dict((k, kwargs[k]) for k in kwargs)]
         super(Args,self).__init__(specs, fp_precision=fp_precision)
+        self.pprint_args([],list(kwargs.keys()), None, dict(**kwargs))
 
-    def __repr__(self):
-        spec = self._specs[0]
-        return "Args(%s)"  % ', '.join(['%s=%s' % (k, fp_repr(v)) for (k,v) in spec.items()])
+    def _repr_pretty_(self, p, cycle): p.text(self._pprint(cycle, annotate=True))
 
 
 class LinearArgs(StaticArgs):
     """
-    LinearArgs generates an argument that has a numerically interpolated range
-    (linear by default). Values formatted to the given floating-point precision.
+    LinearArgs generates an argument from a numerically interpolated range which
+    is linear by default. An optional function can be specified to sample a
+    numeric range with regular intervals.
     """
 
-    arg_name = param.String(default='arg_name',doc='''
-         The name of the argument that is to be linearly varied over a numeric range.''')
+    key = param.String(default='', doc='''
+         The key assigned to values computed over the linear numeric range.''')
 
-    value =  param.Number(default=None, allow_None=True, constant=True, doc='''
+    start_value =  param.Number(default=None, allow_None=True, constant=True, doc='''
          The starting numeric value of the linear interpolation.''')
 
     end_value = param.Number(default=None, allow_None=True, constant=True, doc='''
-         The ending numeric value of the linear interpolation (inclusive).
-         If not specified, will return 'value' (no interpolation).''')
+         The ending numeric value of the linear interpolation (inclusive).''')
 
-    steps = param.Integer(default=1, constant=True, doc='''
-         The number of steps to use in the interpolation. Default is 1.''')
+    steps = param.Integer(default=2, constant=True, bounds=(2,None), doc='''
+         The number of steps to interpolate over. Default is 2 which returns the
+         start and end values without interpolation.''')
 
     # Can't this be a lambda?
     mapfn = param.Callable(default=identityfn, constant=True, doc='''
          The function to be mapped across the linear range. Identity  by default ''')
 
-    def __init__(self, arg_name, value, end_value=None,
-                 steps=1, mapfn=identityfn, **kwargs):
+    def __init__(self, key, start_value, end_value, steps=2, mapfn=identityfn, **kwargs):
 
-        if end_value is not None:
-            values = np.linspace(value, end_value, steps, endpoint=True)
-            specs = [{arg_name:mapfn(val)} for val in values ]
-        else:
-            specs = [{arg_name:mapfn(value)}]
-        self._pparams = ['end_value', 'steps', 'fp_precision', 'mapfn']
+        values = self.linspace(start_value, end_value, steps)
+        specs = [{key:mapfn(val)} for val in values ]
 
-        super(LinearArgs, self).__init__(specs, arg_name=arg_name, value=value,
+        super(LinearArgs, self).__init__(specs, key=key, start_value=start_value,
                                          end_value=end_value, steps=steps,
                                          mapfn=mapfn, **kwargs)
+        self.pprint_args(['key', 'start_value'], ['end_value', 'steps'])
 
-    def __repr__(self):
-        modified = dict(self.get_param_values(onlychanged=True))
-        pstr = ', '.join(['%s=%s' % (k, modified[k]) for k in self._pparams if k in modified])
-        return "%s('%s', %s, %s)" % (self.__class__.__name__, self.arg_name, self.value, pstr)
+    def linspace(self, start, stop, n):
+        """ Nice simple replacement for numpy linspace"""
+        L = [0.0] * n
+        nm1 = n - 1
+        nm1inv = 1.0 / nm1
+        for i in range(n):
+            L[i] = nm1inv * (start*(nm1 - i) + stop*i)
+        return L
+
+    def _repr_pretty_(self, p, cycle): p.text(self._pprint(cycle, annotate=True))
+
 
 class ListArgs(StaticArgs):
     """
     An argument specifier that takes its values from a given list.
     """
 
-    arg_name = param.String(default='default',doc='''
-         The key name that take its values from the given list.''')
+    list_values = param.List(default=[], constant=True, doc='''
+         The list values that are to be returned by the specifier''')
 
-    def __init__(self, arg_name, value_list, **kwargs):
+    list_key = param.String(default='default', constant=True, doc='''
+         The key assigned to the elements of the given list.''')
 
-        assert value_list != [], "Empty list not allowed."
-        specs = [ {arg_name:val} for val in value_list]
-        super(ListArgs, self).__init__(specs, arg_name=arg_name, **kwargs)
+    def __init__(self, list_key, list_values, **kwargs):
 
-    def __repr__(self):
-        value_list = (fp_repr(spec[self.arg_name]) for spec in self._specs)
-        return "%s('%s',[%s])" % (self.__class__.__name__, self.arg_name, ', '.join(value_list))
+        assert list_values != [], "Empty list not allowed."
+        specs = [{list_key:val} for val in list_values]
+        super(ListArgs, self).__init__(specs, list_key=list_key, list_values=list_values, **kwargs)
+        self.pprint_args(['list_key', 'list_values'], [])
+
+    def _repr_pretty_(self, p, cycle): p.text(self._pprint(cycle, annotate=True))
+
+class Log(StaticArgs):
+    """
+    Specifier that loads arguments from a log file in tid (task id) order.  For
+    full control over the arguments, you can use this class with StaticArgs as
+    follows: StaticArgs(Log.extract_log(<log_file>).values()),
+
+    This wrapper class allows a concise representation of log specifiers with
+    the option of adding the task id to the loaded specifications.
+    """
+
+    log_path = param.String(default=None, allow_None=True, constant=True, doc='''
+              The relative or absolute path to the log file. If a relative path
+              is given, the absolute path is computed with param.normalize_path
+              (os.getcwd() by default).''')
+
+    tid_key = param.String(default='tid', constant=True, allow_None=True, doc='''
+               If not None, the key given to the tid values included in the
+               loaded specifications. If None, the tid number is ignored.''')
+
+    @staticmethod
+    def extract_log(log_path, dict_type=dict):
+        """
+        Parses the log file generated by a launcher and returns dictionary with
+        tid keys and specification values.
+
+        Ordering can be maintained by setting dict_type to the appropriate
+        constructor. Keys are converted from unicode to strings for kwarg use.
+        """
+        with open(param.normalize_path(log_path),'r') as log:
+            splits = (line.split() for line in log)
+            uzipped = ((int(split[0]), json.loads(" ".join(split[1:]))) for split in splits)
+            szipped = [(i, dict((str(k),v) for (k,v) in d.items())) for (i,d) in uzipped]
+        return dict_type(szipped)
+
+    @staticmethod
+    def write_log(log_path, data, allow_append=True):
+        """
+        Writes the supplied specifications to the log path. The data may be
+        supplied as either as a StaticSpecifier or as a list of dictionaries.
+
+        By default, specifications will be appropriately appended to an existing
+        log file. This can be disabled by setting allow_append to False.
+        """
+        append = os.path.isfile(log_path)
+        listing = isinstance(data, list)
+
+        if append and not allow_append:
+            raise Exception('Appending has been disabled and file %s exists' % log_path)
+
+        if not (listing or isinstance(data, StaticArgs)):
+            raise Exception('Can only write static specifiers or dictionary lists to log file.')
+
+        specs = data if listing else data.specs
+        if not all(isinstance(el,dict) for el in specs):
+            raise Exception('List elements must be dictionaries.')
+
+        log_file = open(log_path, 'r+') if append else open(log_path, 'w')
+        start = int(log_file.readlines()[-1].split()[0])+1 if append else 0
+        ascending_indices = range(start, start+len(data))
+
+        log_str = '\n'.join(['%d %s' % (tid, json.dumps(el)) for (tid, el) in zip(ascending_indices, specs)])
+        log_file.write("\n"+log_str if append else log_str)
+        log_file.close()
+
+    def __init__(self, log_path, tid_key='tid', **kwargs):
+
+        log_items = sorted(Log.extract_log(log_path).items())
+
+        if tid_key is not None:
+            log_specs = [dict(list(spec.items())+[(tid_key,idx)]) for (idx, spec) in log_items]
+        else:
+            log_specs = [spec for (_, spec) in log_items]
+        super(Log, self).__init__(log_specs, log_path=log_path, tid_key=tid_key, **kwargs)
+        self.pprint_args(['log_path'], ['tid_key'])
+
+    def _repr_pretty_(self, p, cycle): p.text(self._pprint(cycle, annotate=True))
+
+
+class Indexed(StaticArgs):
+    """
+    Given two StaticArgs, link the arguments of via an index value.
+    The index value of the given key must have a matching entry in the
+    index. Once a match is found, the results are merged with the
+    resulting ordering identical to that of the input operand.
+
+    The value used for matching is specified by the key
+    name. Uniqueness of keys in the index is enforced and these keys
+    must be a superset of those expressed by the operand.
+
+    By default, fp_precision is the maximum of that used by the
+    operand and index.
+    """
+    operand = param.ClassSelector(default=None, class_=StaticArgs, allow_None=True, constant=True, doc='''
+              The source specifier from which the index_key is extracted for
+              looking up the corresponding value in the index.''')
+
+    index = param.ClassSelector(default=None, class_=StaticArgs, allow_None=True, constant=True, doc='''
+             The specifier in which a lookup is performed to find the unique
+             matching specification. The index must be longer than the operand
+             and the values of the index_key must be unique.''')
+
+    index_key  = param.String(default=None, allow_None=True, constant=True, doc='''
+             The common key in both the index and the operand used to
+             index the former specifications into the latter.''')
+
+    def __init__(self, operand, index, index_key, fp_precision=None, **kwargs):
+
+        if False in [isinstance(operand, StaticArgs), isinstance(index, StaticArgs)]:
+            raise Exception('Can only index two Static Argument specifiers')
+
+        max_precision = max(operand.fp_precision, index.fp_precision)
+        fp_precision =  max_precision if fp_precision is None else fp_precision
+
+        specs = self._index(operand.specs, index.specs, index_key)
+        super(Indexed,self).__init__(specs, fp_precision=fp_precision, index_key=index_key,
+                                     index=index, operand=operand, **kwargs)
+        self.pprint_args(['operand', 'index', 'index_key'],[])
+
+    def _index(self, specs, index_specs, index_key):
+        keys = [spec[index_key] for spec in specs]
+        index_keys = [spec[index_key] for spec in index_specs]
+
+        if len(index_keys) != len(set(index_keys)):
+            raise Exception("Keys in index must all be unique")
+        if not set(keys).issubset(set(index_keys)):
+            raise Exception("Keys in specifier must be subset of keys in index.")
+
+        spec_items = zip(keys, specs)
+        index_idxmap = dict(zip(index_keys, range(len(index_keys))))
+
+        return [dict(v, **index_specs[index_idxmap[k]]) for (k,v) in spec_items]
+
+    def _repr_pretty_(self, p, cycle): p.text(self._pprint(cycle, annotate=True))
+
+
+class FilePattern(StaticArgs):
+    """
+    A FilePattern specifier allows files to be located via an extended form of
+    globbing. For example, you can find the absolute filenames of all npz files
+    in the data subdirectory (relative to the root) that start with the filename
+    'timeseries' use the pattern 'data/timeseries*.npz'.
+
+    In addition to globbing supported by the glob module, patterns can extract
+    metadata from filenames using a subset of the Python format specification
+    syntax. To illustrate, you can use 'data/timeseries-{date}.npz' to record
+    the date strings associated with matched files. Note that a particular named
+    fields can only be used in a particular pattern once.
+
+    By default metadata is extracted as strings but format types are supported
+    in the usual manner eg. 'data/timeseries-{day:d}-{month:d}.npz' will extract
+    the day and month from the filename as integers. Only field names and types
+    are recognised with all other format specification ignored. Type codes
+    supported: 'd', 'b', 'o', 'x', 'e','E','f', 'F','g', 'G', 'n' (otherwise
+    result is a string).
+
+    Note that ordering is determined via ascending alphanumeric sort and that
+    actual filenames should not include any globbing characters, namely: '?','*','['
+    and ']' (general good practice for filenames).
+    """
+
+    key = param.String(default=None, allow_None=True, constant=True, doc='''
+             The key name given to the matched file path strings.''')
+
+    pattern = param.String(default=None, allow_None=True, constant=True,
+              doc='''The pattern files are to be searched against.''')
+
+    root = param.String(default=None, allow_None=True, constant=True, doc='''
+             The root directory from which patterns are to be loaded.  If set to
+             None, normalize_path.prefix is used (os.getcwd() by default).''')
+
+    @classmethod
+    def directory(cls, directory, root=None, extension=None, **kwargs):
+        """
+        Load all the files in a given directory. Only files with the given file
+        extension are loaded if the extension is specified. The given kwargs are
+        passed through to the normal constructor.
+        """
+        root = param.normalize_path.prefix if root is None else root
+        suffix = '' if extension is None else '.' + extension.rsplit('.')[-1]
+        pattern = directory + os.sep + '*' + suffix
+        key = os.path.join(root, directory,'*').rsplit(os.sep)[-2]
+        format_parse = list(string.Formatter().parse(key))
+        if not all([el is None for el in zip(*format_parse)[1]]):
+            raise Exception('Directory cannot contain format field specifications')
+        return cls(key, pattern, root, **kwargs)
+
+    def __init__(self, key, pattern, root=None, **kwargs):
+        root = param.normalize_path.prefix if root is None else root
+        specs = self._load_expansion(key, root, pattern)
+        updated_specs = self._load_file_metadata(specs, key, **kwargs)
+        super(FilePattern, self).__init__(updated_specs, key=key, pattern=pattern,
+                                          root=root, **kwargs)
+        if len(updated_specs) == 0:
+            print("%r: No matches found." % self)
+        self.pprint_args(['key', 'pattern'], ['root'])
+
+    def fields(self):
+        """
+        Return the fields specified in the pattern using Python's formatting
+        mini-language.
+        """
+        parse = list(string.Formatter().parse(self.pattern))
+        return [f for f in zip(*parse)[1] if f is not None]
+
+    def _load_file_metadata(self, specs, key, **kwargs):
+        """
+        Hook to allow a subclass to load metadata from the located files.
+        """
+        return specs
+
+    def _load_expansion(self, key, root, pattern):#, lexsort):
+        """
+        Loads the files that match the given pattern.
+        """
+        path_pattern = os.path.join(root, pattern)
+        expanded_paths = self._expand_pattern(path_pattern)
+
+        specs=[]
+        for (path, tags) in expanded_paths:
+            rootdir = path if os.path.isdir(path) else os.path.split(path)[0]
+            filelist = [os.path.join(path,f) for f in os.listdir(path)] if os.path.isdir(path) else [path]
+            for filepath in filelist:
+                specs.append(dict(tags,**{key:filepath}))
+
+        return sorted(specs, key=lambda s: s[key])
+
+    def _expand_pattern(self, pattern):
+        """
+        From the pattern decomposition, finds the absolute paths matching the pattern.
+        """
+        (globpattern, regexp, fields, types) = self._decompose_pattern(pattern)
+        filelist = glob.glob(globpattern)
+        expansion = []
+
+        for fname in filelist:
+            if fields == []:
+                expansion.append((fname, {}))
+                continue
+            match = re.match(regexp, fname)
+            if match is None: continue
+            match_items = match.groupdict().items()
+            tags = dict((k,types.get(k, str)(v)) for (k,v) in match_items)
+            expansion.append((fname, tags))
+
+        return expansion
+
+    def _decompose_pattern(self, pattern):
+        """
+        Given a path pattern with format declaration, generates a four-tuple
+        (glob_pattern, regexp pattern, fields, type map)
+        """
+        sep = '~lancet~sep~'
+        float_codes = ['e','E','f', 'F','g', 'G', 'n']
+        typecodes = dict([(k,float) for k in float_codes] + [('b',bin), ('d',int), ('o',oct), ('x',hex)])
+        parse = list(string.Formatter().parse(pattern))
+        text, fields, codes, _ = zip(*parse)
+
+        # Finding the field types from format string
+        types = []
+        for (field, code) in zip(fields, codes):
+            if code in ['', None]: continue
+            constructor =  typecodes.get(code[-1], None)
+            if constructor: types += [(field, constructor)]
+
+        stars =  ['' if not f else '*' for f in fields]
+        globpattern = ''.join(text+star for (text,star) in zip(text, stars))
+
+        refields = ['' if not f else sep+('(?P<%s>.*?)'% f)+sep for f in fields]
+        parts = ''.join(text+group for (text,group) in zip(text, refields)).split(sep)
+        for i in range(0, len(parts), 2): parts[i] = re.escape(parts[i])
+
+        return globpattern, ''.join(parts).replace('\\*','.*'), list(f for f in fields if f), dict(types)
+
+    def _repr_pretty_(self, p, cycle): p.text(self._pprint(cycle, annotate=True))
+
+
+class LexSorted(StaticArgs):
+    """
+    Argument specifiers normally have a clearly defined but implicit, default
+    orderings. Sometimes a different ordering is desired, typically for
+    inspecting the structure of the specifier in some way
+    (ie. viewing). Applying LexSorted to a specifier allows the desired
+    ordering to be achieved.
+
+    The lexical sort order is specified in the 'order' parameter which takes a
+    list of strings. Each string is a key name prefixed by '+' or '-' for
+    ascending and descending sort respectively. If the key is not found in the
+    operand's set of varying keys, it is ignored.
+
+    To illustrate, if order=['+id', '-time'] then the specifier would be sorted
+    by ascending by 'id'value but where id values are equal, it would be sorted
+    by descending 'time' value.
+    """
+    operand = param.ClassSelector(default=None, class_=StaticArgs, allow_None=True, constant=True, doc='''
+              The source specifier which is to be lexically sorted.''')
+
+    order = param.List(default=[], constant=True, doc='''
+             An ordered list of annotated keys for lexical sorting. An annotated
+             key is the usual key name prefixed with either '+' (for ascending
+             sort) or '-' (for descending sort). By default, no sorting is applied.''')
+
+    def __init__(self, operand, order=[], **kwargs):
+        specs = self._lexsort(operand, order)
+        super(LexSorted, self).__init__(specs, operand=operand, order=order, **kwargs)
+        self.pprint_args(['operand','order'],[])
+
+    def _lexsort(self, operand, order=[]):
+        """
+        A lexsort is specified using normal key string prefixed by '+' (for
+        ascending) or '-' for (for descending).
+
+        Note that in Python 2, if a key is missing, None is returned (smallest
+        Python value). In Python 3, an Exception will be raised regarding
+        comparison of heterogenous types.
+        """
+
+        specs = operand.specs[:]
+        if not all(el[0] in ['+', '-'] for el in order):
+            raise Exception("Please prefix sort keys with either '+' (for ascending) or '-' for descending")
+
+        sort_cycles = [(el[1:], True if el[0]=='+' else False) for el in reversed(order)
+                       if el[1:] in operand.varying_keys()]
+
+
+        for (key, ascending) in sort_cycles:
+            specs = sorted(specs, key=lambda s: s.get(key, None), reverse=(not ascending))
+        return specs
+
+    def _repr_pretty_(self, p, cycle): p.text(self._pprint(cycle, annotate=True))
+
+
 
 #=============================#
 # Dynamic argument specifiers #
@@ -565,6 +918,7 @@ class DynamicConcatenate(BaseArgs):
         self._second_cached = None
         if not first.dynamic: self._first_cached = next(first.copy())
         if not second.dynamic: self._second_cached = next(second.copy())
+        self.pprint_args(['first', 'second'],[], infix_operator='+')
 
     def schedule(self):
         if self._first_cached is None:
@@ -599,8 +953,8 @@ class DynamicConcatenate(BaseArgs):
             else:
                 return  next(self.second)
 
-    def __repr__(self):
-        return "(%s + %s)" % (repr(self.first), repr(self.second))
+    def _repr_pretty_(self, p, cycle): p.text(self._pprint(cycle, annotate=True))
+
 
 class DynamicCartesianProduct(BaseArgs):
 
@@ -618,6 +972,8 @@ class DynamicCartesianProduct(BaseArgs):
         self._second_cached = None
         if not first.dynamic: self._first_cached = next(first.copy())
         if not second.dynamic: self._second_cached = next(second.copy())
+
+        self.pprint_args(['first', 'second'],[], infix_operator='*')
 
     def constant_keys(self):
         return list(set(self.first.constant_keys()) | set(self.second.constant_keys()))
@@ -647,7 +1003,7 @@ class DynamicCartesianProduct(BaseArgs):
             second_spec = next(self.second)
             return self._cartesian_product(self._first_cached, second_spec)
 
-    def __repr__(self):   return '(%s * %s)' % (repr(self.first), repr(self.second))
+    def _repr_pretty_(self, p, cycle): p.text(self._pprint(cycle, annotate=True))
 
 
 #===================#
@@ -748,7 +1104,7 @@ class CommandTemplate(param.Parameterized):
                 quoted_cmds = [[pipes.quote(el) \
                                     for el in self(self._formatter(copied, s),'<tid>',info)] \
                               for s in specs]
-                cmd_lines = [ '%d: %s\n' % (i, ' '.join(qcmds)) for (i,qcmds) in enumerate(quoted_cmds)]
+                cmd_lines = ['%d: %s\n' % (i, ' '.join(qcmds)) for (i,qcmds) in enumerate(quoted_cmds)]
                 full_string += ''.join(cmd_lines)
 
         file_handle.write(full_string)
@@ -851,12 +1207,9 @@ class Launcher(param.Parameterized):
         The log contains the tids and corresponding specifications used during
         launch with the specifications in json format.
         """
-
-        self._spec_log += specs
-        with open(os.path.join(self.root_directory,
-                               ("%s.log" % self.batch_name)), 'a') as log:
-            lines = ['%d %s' % (tid, json.dumps(spec)) for (tid, spec) in specs]
-            log.write('\n'.join(lines))
+        self._spec_log += specs # This should be removed
+        log_path = os.path.join(self.root_directory, ("%s.log" % self.batch_name))
+        Log.write_log(log_path, [spec for (_, spec) in specs], allow_append=True)
 
     def record_info(self, setup_info=None):
         """
@@ -1298,6 +1651,122 @@ class QLauncher(Launcher):
 # Launch Helper #
 #===============#
 
+class applying(param.Parameterized):
+    """
+    Decorator to invoke Python code (callables) with a specifier, optionally
+    creating a log of the arguments used.  By default data is passed in as
+    keywords but positional arguments can be specified using the 'args'
+    parameter.
+
+    Automatically accumulates the return values of any callable (functions or
+    classes). The return value is an instance of this class which may be called
+    without arguments to repeat the last operation or bound to another function
+    with the same call signature to call that instead.
+
+    values = applying(ListArgs('value',[1,2,3]))
+
+    values(lambda value: value +1)
+    values(lambda value: value**2)
+    values() # Repeats the last function set
+
+    values.accumulator
+    ... [2, 3, 4, 1, 4, 9, 1, 4, 9]
+
+    May also be used as a decorator to wrap a single function:
+
+    @applying(ListArgs('value',[1,2,3,4]))
+    def add_one(value=None):
+        return value +1
+
+    add_one.accumulator
+    ... [2, 3, 4]
+
+    Dynamic specifiers may be updated as necessary with the update_fn parameter.
+    """
+
+    specifier = param.ClassSelector(default=None, allow_None=True, constant=True, class_=StaticArgs,
+               doc='''The specifier from which the positional and keyword
+                arguments are to be derived.''')
+
+    args = param.List(default=[], constant=True, doc='''The list of positional arguments to generate.''')
+
+    callee = param.Callable(doc='''The function that is to be applied.''')
+
+    log_path = param.String(default=None, allow_None=True, doc='''
+              Optional path to a log file for recording the list of arguments used.''')
+
+    update_fn = param.Callable(default=lambda spec, values: None, doc='''
+                 Hook to call to update dynamic specifiers as necessary.  This
+                 callable takes two arguments, first the specifier that needs
+                 updating and the list of accumulated values from the current
+                 group of results.''')
+
+    accumulator = param.List(default=[], doc='''Accumulates the return values of the callable.''')
+
+    def __init__(self, specifier, **kwargs):
+        super(applying, self).__init__(specifier=specifier, **kwargs)
+
+    @property
+    def kwargs(self):
+        all_keys = self.specifier.constant_keys() + self.specifier.varying_keys()
+        return [k for k in all_keys if k not in self.args]
+
+    def _args_kwargs(self, specs, args):
+        """
+        Separates out args from kwargs given a list of non-kwarg arguments.
+        When the args list is empty, kwargs alone are returned.
+        """
+        if args ==[]: return specs
+        arg_list = [v for (k,v) in specs.items() if k in args]
+        kwarg_dict = dict((k,v) for (k,v) in specs.items() if (k not in args))
+        return (arg_list, kwarg_dict)
+
+    def __call__(self, fn=None):
+        if fn is not None:
+            self.callee = fn
+            return self
+
+        if self.callee is None:
+            print('No callable specified.')
+            return self
+
+        if self.log_path and os.path.isfile(self.log_path):
+            raise Exception('Log %r already exists.' % self.log_path)
+
+        log = []
+        for concurrent_group in self.specifier:
+            concurrent_values = []
+            for specs in concurrent_group:
+                value = self.callee(**specs)
+                concurrent_values.append(value)
+                log.append(specs)
+
+            self.update_fn(self.specifier, concurrent_values)
+            self.accumulator.extend(concurrent_values)
+
+        if self.log_path:
+            Log.write_log(self.log_path, log, allow_append=False)
+        return self
+
+    def __repr__(self):
+        arg_list = ['%r' % self.specifier,
+                'args=%s' % self.args if self.args else None,
+                'accumulator=%s' % self.accumulator]
+        arg_str = ','.join(el for el in arg_list if el is not None)
+        return 'applying(%s)' % arg_str
+
+    def __str__(self):
+        arg_list = ['args=%r' % self.args if self.args else None,
+                    'accumulator=%r' % self.accumulator]
+        arg_str = ',\n   ' + ',\n    '.join(el for el in arg_list if el is not None)
+        return 'applying(\n   specifier=%s%s\n)' % (self.specifier._pprint(level=2), arg_str)
+
+    def _repr_pretty_(self, p, cycle):
+        annotation = ('# == %d items accumulated, callee=%r ==\n' %
+                      (len(self.accumulator),
+                       self.callee.__name__ if hasattr(self.callee, '__name__') else 'None'))
+        p.text(annotation+ str(self))
+
 class review_and_launch(param.Parameterized):
     """
     The basic example of the sort of helper that is highly recommended for
@@ -1313,7 +1782,8 @@ class review_and_launch(param.Parameterized):
     guaranteed to execute *after* all tasks are complete (eg. due to forking,
     subprocess, qsub etc). This decorator helps solves this issue, making sure
     launch is the last thing in the definition function. The reduction_fn
-    parameter is the proper way of executing code after the Launcher exits."""
+    parameter is the proper way of executing code after the Launcher exits.
+    """
 
     launcher_class = param.Parameter(doc='''
          The launcher class used for this lancet script.  Necessary to access
@@ -1335,6 +1805,8 @@ class review_and_launch(param.Parameterized):
                  allowing multi-launch scripts.  Useful for collecting
                  statistics over runs that are not deterministic or are affected
                  by a random seed for example.''')
+
+    launch_fn = param.Callable(doc='''The function that is to be applied.''')
 
     def __init__(self, launcher_class, output_directory='.', **kwargs):
 
@@ -1404,8 +1876,13 @@ class review_and_launch(param.Parameterized):
 
         if clashes != []: raise Exception("Keys %s not in CommandTemplate allowed list" % list(clashes[0]))
 
-    def __call__(self, f):
-        if self.main_script and f.__module__ != '__main__': return False
+    def __call__(self, fn=None):
+
+        if fn is not None:
+            self.launch_fn = fn
+            return self
+
+        if self.main_script and self.launch_fn.__module__ != '__main__': return False
 
         # Resuming launch as necessary
         if self.launcher_class.resume_launch(): return False
@@ -1415,11 +1892,11 @@ class review_and_launch(param.Parameterized):
             param.normalize_path.prefix = self.output_directory
 
         # Calling the wrapped function with appropriate arguments
-        kwargs_list = [{}] if (self.launch_args is None) else list(self.launch_args(review=False))
-        lvals = [f(**kwargs_list[0])]
+        kwargs_list = [{}] if (self.launch_args is None) else self.launch_args.specs
+        lvals = [self.launch_fn(**kwargs_list[0])]
         if self.launch_args is not None:
             self.launcher_class.timestamp = self._get_launcher(lvals[0]).timestamp
-            lvals += [f(**kwargs) for kwargs in kwargs_list[1:]]
+            lvals += [self.launch_fn(**kwargs) for kwargs in kwargs_list[1:]]
 
         # Cross checks
         for (accessor, checker) in self._cross_checks:
@@ -1443,6 +1920,8 @@ class review_and_launch(param.Parameterized):
                     if skip_remaining == 'quit': return False
                     if skip_remaining == 'y': break
 
+            if IPython: self.save_notebook(lvals)
+
             if self.input_options(['y','N'], 'Execute?', default='n') != 'y':
                 return False
 
@@ -1455,6 +1934,40 @@ class review_and_launch(param.Parameterized):
             launcher.launch()
 
         return True
+
+    def save_notebook(self, lvals):
+        """
+        Saves the launch specifiers together in an IPython notebook for
+        convenient viewing. Only offered as an option if IPython is available.
+        """
+
+        from IPython.nbformat import current
+        notebook_dir = os.environ.get('LANCET_NB_DIR',None)
+        notebook_dir = notebook_dir if notebook_dir else os.getcwd()
+
+        if self.input_options(['y','N'], 'Save IPython notebook?', default='n') == 'y':
+            print('Notebook directory ($LANCET_NB_DIR): %s' % notebook_dir)
+            isdir = False
+            while not isdir:
+                fname = input('Filename: ').replace(' ','_')
+                fname = fname if fname.endswith('.ipynb') else fname+'.ipynb'
+                nb_path = os.path.abspath(os.path.join(notebook_dir, fname))
+                isdir = os.path.isdir(os.path.split(nb_path)[0])
+                if not isdir:  print('Invalid directory %s' % os.path.split(nb_path)[0])
+
+            ccell = '\n# <codecell>\n'; mcell='\n# <markdowncell>\n'
+            header = ['# -*- coding: utf-8 -*-','# <nbformat>3.0</nbformat>']
+            prelude = ['from lancet import *',
+                       'from IPython.display import HTML',
+                       'StaticArgs.HTML = HTML']
+            header_str =  '\n'.join(header) + ccell + ccell.join(prelude)
+
+            html_reprs = [ccell+'(%r).html()' % lval[0].arg_specifier for lval in lvals]
+            zipped = [(mcell+'# #### Launch %d' %i, r) for (i,r) in enumerate(html_reprs)]
+            body_str = ''.join([val for pair in zipped for val in pair])
+            node = current.reads(header_str + body_str, 'py')
+            current.write(node, open(nb_path, 'w'), 'ipynb')
+            print("Saved to %s " % nb_path)
 
     def review_launcher(self, launcher):
         command_template = launcher.command_template
@@ -1482,8 +1995,9 @@ class review_and_launch(param.Parameterized):
         print("Type: %s (dynamic=%s)" %
               (arg_specifier.__class__.__name__, arg_specifier.dynamic))
         print("Varying Keys: %s" % arg_specifier.varying_keys())
-        print("Constant Keys: %s" % arg_specifier.constant_keys())
-        print("Definition: %s" % arg_specifier)
+        items = '\n'.join(['%s = %r' % (k,v) for (k,v) in arg_specifier.constant_items()])
+        print("Constant Items:\n\n%s\n" % items)
+        print("Definition:\n%s" % arg_specifier)
 
         response = self.input_options(['Y', 'n','quit'],
                 '\nShow available argument specifier entries?', default='y')
@@ -1512,3 +2026,26 @@ class review_and_launch(param.Parameterized):
                 command_template.show(arg_specifier, file_handle=f)
         print()
         return True
+
+    def __repr__(self):
+        arg_list = ['%s' % self.launcher_class.__name__,
+                    '%r' % self.output_directory,
+                    'launch_args=%r' % self.launch_args if self.launch_args else None,
+                    'review=False' if not self.review else None,
+                    'main_script=False' if not self.main_script else None ]
+        arg_str = ','.join(el for el in arg_list if el is not None)
+        return 'review_and_launch(%s)' % arg_str
+
+    def __str__(self):
+        arg_list = ['launcher_class=%s' % self.launcher_class.__name__,
+                    'output_directory=%r' % self.output_directory,
+                    'launch_args=%s' % self.launch_args._pprint(level=2) if self.launch_args else None,
+                    'review=False' if not self.review else None,
+                    'main_script=False' if not self.main_script else None ]
+        arg_str = ',\n   '.join(el for el in arg_list if el is not None)
+        return 'review_and_launch(\n   %s\n)' % arg_str
+
+    def _repr_pretty_(self, p, cycle):
+        annotation = ('# == launch_fn=%r ==\n' %
+                      (self.launch_fn.__name__ if hasattr(self.launch_fn, '__name__') else 'None',))
+        p.text(annotation+ str(self))
