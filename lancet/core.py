@@ -49,7 +49,7 @@ class PrettyPrinted(object):
         (kwargs,_,_,_) = self._pprint_args
         self._pprint_args = (keyword_args + kwargs, pos_args, infix_operator, extra_params)
 
-    def _pprint(self, cycle=False, flat=False, annotate=False, level=1, tab = '   '):
+    def _pprint(self, cycle=False, flat=False, annotate=False, onlychanged=True, level=1, tab = '   '):
         """
         Pretty printer that prints only the modified keywords and
         generates flat representations (for repr) and optionally
@@ -62,7 +62,7 @@ class PrettyPrinted(object):
 
         params = dict(self.get_param_values())
         show_lexsort = getattr(self, '_lexorder', None) is not None
-        modified = [k for (k,v) in self.get_param_values(onlychanged=True)]
+        modified = [k for (k,v) in self.get_param_values(onlychanged=onlychanged)]
         pkwargs = [(k, params[k])  for k in kwargs if (k in modified)] + list(extra_params.items())
         arg_list = [(k,params[k]) for k in pos_args] + pkwargs
 
@@ -94,7 +94,7 @@ class PrettyPrinted(object):
         return ''.join(lines)
 
     def __repr__(self):
-        return self._pprint(flat=True)
+        return self._pprint(flat=True, onlychanged=False)
 
     def __str__(self):
         return self._pprint()
@@ -271,8 +271,9 @@ class Args(BaseArgs):
                            if k not in extra_kwargs])
             rounded_specs = list(self.round_floats([extra_kwargs],
                                                    fp_precision))
-            explicit = True if (rounded_specs==[{}]) else False
-            return rounded_specs, kwargs, explicit
+
+            if extra_kwargs=={}: return [], kwargs, True
+            else:                return rounded_specs, kwargs, False
 
         return list(self.round_floats(specs, fp_precision)), kwargs, True
 
@@ -498,8 +499,6 @@ class List(Args):
          The key assigned to the elements of the supplied list.''')
 
     def __init__(self, key, values, **kwargs):
-
-        assert values != [], "Empty list not allowed."
         specs = [{key:val} for val in values]
         super(List, self).__init__(specs, key=key, values=values, **kwargs)
         self.pprint_args(['key', 'values'], [])
@@ -663,8 +662,6 @@ class FilePattern(Args):
         specs = self._load_expansion(key, root, pattern)
         super(FilePattern, self).__init__(specs, key=key, pattern=pattern,
                                           root=root, **kwargs)
-        if len(specs) == 0:
-            print("%r: No matches found." % self)
         self.pprint_args(['key', 'pattern'], ['root'])
 
     def fields(self):
@@ -801,7 +798,12 @@ class FileInfo(Args):
         loaded_data = filename_series.map(self.filetype.data)
         keys = [list(el.keys()) for el in loaded_data.values]
         for key in set().union(*keys):
-            dframe[key] = loaded_data.map(lambda x: x.get(key, np.nan))
+            key_exists = key in dframe.columns
+            if key_exists:
+                self.warning("Appending '_data' suffix to data key %r to avoid"
+                             "overwriting existing metadata with the same name." % key)
+            suffix = '_data' if key_exists else ''
+            dframe[key+suffix] = loaded_data.map(lambda x: x.get(key, np.nan))
         return dframe
 
     def _info(self, source, key, filetype, load_contents, ignore):
@@ -830,7 +832,7 @@ class FileInfo(Args):
 
         # Metadata clashes can be avoided by using the ignore list.
         if mdata_clashes:
-            print("WARNING: Loaded metadata keys overriding source keys.")
+            self.warning("Loaded metadata keys overriding source keys.")
         if datakey_clashes:
-            print("WARNING: Loaded data keys overriding source and/or metadata keys")
+            self.warning("Loaded data keys overriding source and/or metadata keys")
         return specs, data_keys
