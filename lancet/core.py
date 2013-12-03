@@ -2,8 +2,8 @@
 # Lancet core
 #
 
-import os, time, itertools, copy
-import re, glob, string, re
+import os, itertools, copy
+import re, glob, string
 import json
 
 import param
@@ -15,7 +15,7 @@ except:
     np, np_ftypes = None, []
 
 try:    from pandas import DataFrame
-except: DataFrame = None
+except: DataFrame = None # pyflakes:ignore (try/except import)
 
 from collections import defaultdict
 
@@ -27,7 +27,7 @@ def set_fp_precision(value):
     """
     Function to set the floating precision across lancet.
     """
-    BaseArgs.set_default('fp_precision', value)
+    Arguments.set_default('fp_precision', value)
 
 #=====================#
 # Argument Specifiers #
@@ -101,7 +101,21 @@ class PrettyPrinted(object):
 
 
 
-class BaseArgs(PrettyPrinted, param.Parameterized):
+class Arguments(PrettyPrinted, param.Parameterized):
+    """
+    The abstract, base class that defines the core interface and
+    methods for all members of the Arguments family of classes,
+    including either the simple, static members of Args below, or the
+    sophisticated parameter exploration algorithms subclassing from
+    DynamicArgs defined in dynamic.py.
+
+    The Args subclass may be used directly and forms the root of one
+    family of classes that have statically defined or precomputed
+    argument sets (defined below). The second subfamily are the
+    DynamicArgs, designed to allow more sophisticated, online
+    parameter space exploration techniques such as hill climbing,
+    bisection search, genetic algorithms and so on.
+    """
 
     fp_precision = param.Integer(default=4, constant=True, doc='''
          The floating point precision to use for floating point
@@ -113,7 +127,7 @@ class BaseArgs(PrettyPrinted, param.Parameterized):
     def __init__(self, **params):
         self._pprint_args = ([],[],None,{})
         self.pprint_args([],['fp_precision', 'dynamic'])
-        super(BaseArgs,self).__init__(**params)
+        super(Arguments,self).__init__(**params)
         # Some types cannot be sorted easily (e.g. numpy arrays)
         self.unsortable_keys = []
 
@@ -239,7 +253,34 @@ class BaseArgs(PrettyPrinted, param.Parameterized):
             print("Constant Items: %s" % items)
 
 
-class Args(BaseArgs):
+class Args(Arguments):
+    """
+    An Arguments class that supports statically specified or
+    precomputed argument sets. It may be used directly to specify
+    argument values but also forms the base class for a family of more
+    specific static Argument classes. Each subclass is less flexible
+    and general but allows arguments to be easily and succinctly
+    specified. For instance, the Range subclass allows parameter
+    ranges to be easily declared.
+
+    The constructor of Args accepts argument definitions in two
+    different formats. The keyword format allows constant arguments to
+    be specified directly and easily. For instance:
+
+    >>> Args(a=2, b=3)
+
+    The alternative input format takes an explicit list of the
+    argument specifications:
+
+    >>> Args([{'a':3, 'b':5}]) # Equivalent behaviour to above
+
+    This latter format is completely flexible and general, allowing
+    any arbitrary list of arguments to be specified as desired. This
+    is not generally recommended however as the structure of a
+    parameter space is often expressed more clearly by composing
+    together simpler, more succinct Args objects with the
+    CartesianProduct (*) or Concatenation (+) operators.
+    """
 
     specs = param.List(default=[], constant=True, doc='''
           The static list of specifications (ie. dictionaries) to be
@@ -247,7 +288,7 @@ class Args(BaseArgs):
           according to fp_precision.''')
 
     def __init__(self, specs=None, fp_precision=None, **kwargs):
-        if fp_precision is None: fp_precision = BaseArgs.fp_precision
+        if fp_precision is None: fp_precision = Arguments.fp_precision
         raw_specs, kwargs, explicit = self._build_specs(specs, kwargs, fp_precision)
         super(Args, self).__init__(fp_precision=fp_precision, specs=raw_specs, **kwargs)
 
@@ -681,7 +722,6 @@ class FilePattern(Args):
 
         specs=[]
         for (path, tags) in expanded_paths:
-            rootdir = path if os.path.isdir(path) else os.path.split(path)[0]
             filelist = [os.path.join(path,f) for f in os.listdir(path)] if os.path.isdir(path) else [path]
             for filepath in filelist:
                 specs.append(dict(tags,**{key:os.path.abspath(filepath)}))

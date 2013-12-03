@@ -2,40 +2,40 @@
 # Lancet launchers and launch helpers
 #
 
-import os, sys, time, pipes, subprocess, types
-import fnmatch
+import os, sys, platform, time, pipes, subprocess, types
 import json, pickle
 
 import param
 
 import lancet.core as core
+from lancet import __version__ as lancet_version
 from lancet.dynamic import DynamicArgs
 
 #===================#
 # Commands Template #
 #===================#
 
-class CommandTemplate(core.PrettyPrinted, param.Parameterized):
+class Command(core.PrettyPrinted, param.Parameterized):
     """
-    A command template is a way of converting the dictionaries
-    returned by argument specifiers into a particular command. When
-    called with an argument specifier, a command template returns a
-    list of strings corresponding to a subprocess Popen argument list.
+    A command is a way of converting the dictionaries returned by
+    argument specifiers into a particular command. When called with an
+    argument specifier, a command template returns a list of strings
+    corresponding to a subprocess Popen argument list.
 
     __call__(self, spec, tid=None, info={}):
 
-    All CommandTemplates must be callable. The tid argument is the
-    task id and info is a dictionary of run-time information supplied
-    by the launcher. See the _setup_launch method of Launcher to see
-    details about the launch information supplied.
+    All Commands must be callable. The tid argument is the task id and
+    info is a dictionary of run-time information supplied by the
+    launcher. See the _setup_launch method of Launcher to see details
+    about the launch information supplied.
     """
 
     executable = param.String(default='python', constant=True, doc='''
-        The executable that is to be run by this
-        CommandTemplate. Unless the executable is a standard command
-        expected on the system path, this should be an absolute
-        path. By default this invokes python or the python environment
-        used to invoke the CommandTemplate (eg. topographica).''')
+        The executable that is to be run by this Command. Unless the
+        executable is a standard command expected on the system path,
+        this should be an absolute path. By default this invokes
+        python or the python environment used to invoke the Command
+        (Topographica for instance).''')
 
     do_format = param.Boolean(default=True, doc= '''
         Set to True to receive input arguments as formatted strings,
@@ -45,7 +45,7 @@ class CommandTemplate(core.PrettyPrinted, param.Parameterized):
         if executable is None:
             executable = sys.executable
         self._pprint_args = ([],[],None,{})
-        super(CommandTemplate,self).__init__(executable=executable, **kwargs)
+        super(Command,self).__init__(executable=executable, **kwargs)
         self.pprint_args([],[])
 
     def __call__(self, spec, tid=None, info={}):
@@ -58,7 +58,7 @@ class CommandTemplate(core.PrettyPrinted, param.Parameterized):
         raise NotImplementedError
 
     def _formatter(self, spec):
-        if self.do_format: return core.BaseArgs.spec_formatter(spec)
+        if self.do_format: return core.Arguments.spec_formatter(spec)
         else             : return spec
 
     def show(self, args, file_handle=sys.stdout, **kwargs):
@@ -97,26 +97,26 @@ class CommandTemplate(core.PrettyPrinted, param.Parameterized):
 
     def finalize(self, info):
         """
-        Optional method that allows a CommandTemplate to save state
-        before launch. The info argument is supplied by the Launcher.
+        Optional method that allows a Command to save state before
+        launch. The info argument is supplied by the Launcher.
         """
         return
 
     def summary(self):
         """
-        A succinct summary of the CommandTemplate configuration.
-         Unlike the repr, a summary does not have to be complete but
-         must supply key information relevant to the user. Must begin
-         by stating the executable.
+        A succinct summary of the Command configuration.  Unlike the
+        repr, a summary does not have to be complete but must supply
+        key information relevant to the user. Must begin by stating
+        the executable.
         """
         raise NotImplementedError
 
 
-class UnixCommand(CommandTemplate):
+class ShellCommand(Command):
     """
-    A generic CommandTemplate useable with most Unix commands. By
-    default, follows the GNU coding convention for commandline
-    arguments.
+    A generic Command that can be used to invoke shell commands on
+    most operating systems where Python can be run. By default,
+    follows the GNU coding convention for commandline arguments.
     """
 
     expansions = param.Dict(default={}, constant=True, doc='''
@@ -133,12 +133,16 @@ class UnixCommand(CommandTemplate):
        The list of positional argument keys. Positional arguments are
        always supplied at the end of a command in the order given.''')
 
+    short_prefix = param.String(default='-',  constant=True, doc='''
+       Although the single dash is a GNU coding convention, the
+       argument prefix may depend on the applications and/or platform.''')
+
     long_prefix = param.String(default='--',  constant=True, doc='''
        Although the double dash is a GNU coding convention, some
        applications use single dashes for long options.''')
 
     def __init__(self, executable, **kwargs):
-        super(UnixCommand,self).__init__(executable = executable,
+        super(ShellCommand,self).__init__(executable = executable,
                                          do_format=False,
                                          **kwargs)
         self.pprint_args(['executable','posargs'],['long_prefix'])
@@ -153,13 +157,13 @@ class UnixCommand(CommandTemplate):
                 expanded[k] = v
 
         expanded.update(spec)
-        expanded = core.BaseArgs.spec_formatter(expanded)
+        expanded = core.Arguments.spec_formatter(expanded)
 
         options = []
         for (k, v) in expanded.items():
             if k in self.posargs or spec[k] == False:
                 continue
-            options.append('%s%s' % (self.long_prefix if len(k) > 1 else '-', k))
+            options.append('%s%s' % (self.long_prefix if len(k) > 1 else self.short_prefix, k))
             if spec[k] != True:
                 options.append(v)
 
@@ -179,7 +183,7 @@ class UnixCommand(CommandTemplate):
             return  info['root_directory']
 
         def __repr__(self):
-            return "UnixCommand.RootDirectory()"
+            return "ShellCommand.RootDirectory()"
 
     class LongFilename(object):
         """
@@ -203,7 +207,7 @@ class UnixCommand(CommandTemplate):
         def __repr__(self):
             items = ([self.extension, self.excluding]
                      if self.excluding else [self.extension])
-            return ("UnixCommand.LongFilename(%s)"
+            return ("ShellCommand.LongFilename(%s)"
                     % ', '.join('%r' % el for el in items))
 
     class Expand(object):
@@ -222,7 +226,7 @@ class UnixCommand(CommandTemplate):
             return self.template.format(**all_params)
 
         def __repr__(self):
-            return "UnixCommand.Expand(%r)" % self.template
+            return "ShellCommand.Expand(%r)" % self.template
 
 
 #===========#
@@ -246,10 +250,10 @@ class Launcher(core.PrettyPrinted, param.Parameterized):
     batch_name = param.String(default=None, allow_None=True, constant=True,
        doc='''A unique identifier for the current batch''')
 
-    args = param.ClassSelector(core.BaseArgs, constant=True, doc='''
+    args = param.ClassSelector(core.Arguments, constant=True, doc='''
        The specifier used to generate the varying parameters for the tasks.''')
 
-    command = param.ClassSelector(CommandTemplate, constant=True, doc='''
+    command = param.ClassSelector(Command, constant=True, doc='''
        The command template used to generate the commands for the current tasks.''')
 
     output_directory = param.String(default='.', doc='''
@@ -309,6 +313,7 @@ class Launcher(core.PrettyPrinted, param.Parameterized):
         self.pprint_args(['batch_name','args','command'],
                          ['description', 'tag', 'output_directory',
                           'subdir','metadata'])
+        self.dynamic = isinstance(args, DynamicArgs)
 
     def get_root_directory(self, timestamp=None):
         """
@@ -326,7 +331,7 @@ class Launcher(core.PrettyPrinted, param.Parameterized):
                                 *(self.subdir+[root_name]))
         return os.path.abspath(path)
 
-    def append_log(self, specs):
+    def _append_log(self, specs):
         """
         The log contains the tids and corresponding specifications
         used during launch with the specifications in JSON format.
@@ -335,7 +340,7 @@ class Launcher(core.PrettyPrinted, param.Parameterized):
         log_path = os.path.join(self.root_directory, ("%s.log" % self.batch_name))
         core.Log.write_log(log_path, [spec for (_, spec) in specs], allow_append=True)
 
-    def record_info(self, setup_info=None):
+    def _record_info(self, setup_info=None):
         """
         All launchers should call this method to write the info file
         at the end of the launch. The .info file is saved given
@@ -372,16 +377,25 @@ class Launcher(core.PrettyPrinted, param.Parameterized):
         if not os.path.isdir(self.root_directory):
             os.makedirs(self.root_directory)
 
+        platform_dict = {}
+        python_version = (platform.python_implementation()
+                          + platform.python_version())
+        platform_dict['platform']       = platform.platform()
+        platform_dict['python_version'] = python_version
+        platform_dict['lancet_version'] = lancet_version
+
         return {'root_directory':    self.root_directory,
                 'batch_name':        self.batch_name,
                 'batch_tag':         self.tag,
                 'batch_description': self.description,
                 'launcher':          repr(self),
+                'platform' :         platform_dict,
                 'timestamp':         self.timestamp,
                 'timestamp_format':  self.timestamp_format,
                 'varying_keys':      self.args.varying_keys,
                 'constant_keys':     self.args.constant_keys,
                 'constant_items':    self.args.constant_items}
+
 
     def _setup_streams_path(self):
         streams_path = os.path.join(self.root_directory, "streams")
@@ -392,7 +406,7 @@ class Launcher(core.PrettyPrinted, param.Parameterized):
         while not os.path.isdir(streams_path): pass
         return streams_path
 
-    def launch_process_group(self, process_commands, streams_path):
+    def _launch_process_group(self, process_commands, streams_path):
         """
         Launches processes defined by process_commands, but only
         executes max_concurrency processes at a time; if a process
@@ -423,10 +437,12 @@ class Launcher(core.PrettyPrinted, param.Parameterized):
 
         for cmd, tid in process_commands:
             self.debug("Starting process %d..." % tid)
+            job_timestamp = time.strftime('%H%M%S')
+            basename = "%s_%s_tid_%d" % (self.batch_name, job_timestamp, tid)
             stdout_handle = open(os.path.join(streams_path, "%s.o.%d"
-                                              % (self.batch_name, tid)), "wb")
+                                              % (basename, tid)), "wb")
             stderr_handle = open(os.path.join(streams_path, "%s.e.%d"
-                                              % (self.batch_name, tid)), "wb")
+                                              % (basename, tid)), "wb")
             proc = subprocess.Popen(cmd, stdout=stdout_handle, stderr=stderr_handle)
             processes[proc] = { 'tid' : tid,
                                 'stdout' : stdout_handle,
@@ -452,7 +468,7 @@ class Launcher(core.PrettyPrinted, param.Parameterized):
         streams_path = self._setup_streams_path()
         self.command.finalize(launchinfo)
 
-        self.record_info(launchinfo)
+        self._record_info(launchinfo)
 
         last_tid = 0
         last_tids = []
@@ -463,17 +479,17 @@ class Launcher(core.PrettyPrinted, param.Parameterized):
                                 self.command._formatter(spec), tid, launchinfo) \
                            for (spec,tid) in zip(groupspecs,tids)]
 
-            self.append_log(list(zip(tids,groupspecs)))
+            self._append_log(list(zip(tids,groupspecs)))
 
             self.message("Group %d: executing %d processes..." % (gid, len(allcommands)))
-            self.launch_process_group(zip(allcommands,tids), streams_path)
+            self._launch_process_group(zip(allcommands,tids), streams_path)
 
             last_tids = tids[:]
 
-            if isinstance(self.args, DynamicArgs):
+            if self.dynamic:
                 self.args.update(last_tids, launchinfo)
 
-        self.record_info()
+        self._record_info()
         if self.reduction_fn is not None:
             self.reduction_fn(self._spec_log, self.root_directory)
 
@@ -491,6 +507,8 @@ class Launcher(core.PrettyPrinted, param.Parameterized):
         print("Maximum concurrency: %s" % self.max_concurrency)
         if self.description:
             print("Description: %s" % self.description)
+
+
 
 class QLauncher(Launcher):
     """
@@ -533,23 +551,16 @@ class QLauncher(Launcher):
                 command, **kwargs)
 
         self._launchinfo = None
-        self.schedule = None
         self.last_tids = []
         self._spec_log = []
         self.last_tid = 0
-        self.last_scheduled_tid = 0
         self.collate_count = 0
         self.spec_iter = iter(self.args)
 
         self.max_concurrency = None # Inherited
 
-        # The necessary conditions for reserving jobs before specification known.
-        self.is_dynamic_qsub = all([isinstance(self.args, DynamicArgs),
-                                    hasattr(self.args, 'schedule'),
-                                    hasattr(self.command,   'queue'),
-                                    hasattr(self.command,   'specify')])
 
-    def qsub_args(self, override_options, cmd_args, append_options=[]):
+    def _qsub_args(self, override_options, cmd_args, append_options=[]):
         """
         Method to generate Popen style argument list for qsub using
         the qsub_switches and qsub_flag_options parameters. Switches
@@ -601,16 +612,15 @@ class QLauncher(Launcher):
 
         self.collate_and_launch()
 
-        self.record_info(self._launchinfo)
+        self._record_info(self._launchinfo)
 
     def collate_and_launch(self):
         """
         Method that collates the previous jobs and launches the next
-        block of concurrent jobs. The launch type can be either static
-        or dynamic (using schedule, queue and specify for dynamic
-        argument specifiers).  This method is invoked on initial
-        launch and then subsequently via the commandline to collate
-        the previously run jobs and launching the next block of jobs.
+        block of concurrent jobs when using DynamicArgs. This method
+        is invoked on initial launch and then subsequently via a
+        commandline call (to Python via qsub) to collate the
+        previously run jobs and launch the next block of jobs.
         """
 
         try:   specs = next(self.spec_iter)
@@ -618,29 +628,28 @@ class QLauncher(Launcher):
             self.qdel_batch()
             if self.reduction_fn is not None:
                 self.reduction_fn(self._spec_log, self.root_directory)
-            self.record_info()
+            self._record_info()
             return
 
         tid_specs = [(self.last_tid + i, spec) for (i,spec) in enumerate(specs)]
         self.last_tid += len(specs)
-        self.append_log(tid_specs)
+        self._append_log(tid_specs)
 
         # Updating the argument specifier
-        if isinstance(self.args,DynamicArgs):
+        if self.dynamic:
             self.args.update(self.last_tids, self._launchinfo)
         self.last_tids = [tid for (tid,_) in tid_specs]
 
         output_dir = self.qsub_flag_options['-o']
         error_dir = self.qsub_flag_options['-e']
-        if self.is_dynamic_qsub: self.dynamic_qsub(output_dir, error_dir, tid_specs)
-        else:            self.static_qsub(output_dir, error_dir, tid_specs)
+        self._qsub_block(output_dir, error_dir, tid_specs)
 
         # Pickle launcher before exit if necessary.
-        if isinstance(self.args,DynamicArgs) or (self.reduction_fn is not None):
+        if self.dynamic or (self.reduction_fn is not None):
             pickle_path = os.path.join(self.root_directory, 'qlauncher.pkl')
             pickle.dump(self, open(pickle_path,'wb'))
 
-    def qsub_collate_and_launch(self, output_dir, error_dir, job_names):
+    def _qsub_collate_and_launch(self, output_dir, error_dir, job_names):
         """
         The method that actually runs qsub to invoke the python
         process with the necessary commands to trigger the next
@@ -662,7 +671,7 @@ class QLauncher(Launcher):
 
         cmd_args = [self.command.executable,
                     '-c', ';'.join(resume_cmds)]
-        popen_args = self.qsub_args(overrides, cmd_args)
+        popen_args = self._qsub_args(overrides, cmd_args)
 
         p = subprocess.Popen(popen_args, stdout=subprocess.PIPE)
         (stdout, stderr) = p.communicate()
@@ -672,7 +681,7 @@ class QLauncher(Launcher):
         self.message("Invoked qsub for next batch.")
         return job_name
 
-    def static_qsub(self, output_dir, error_dir, tid_specs):
+    def _qsub_block(self, output_dir, error_dir, tid_specs):
         """
         This method handles static argument specifiers and cases where
         the dynamic specifiers cannot be queued before the arguments
@@ -682,13 +691,13 @@ class QLauncher(Launcher):
         job_names = []
 
         for (tid, spec) in tid_specs:
-            job_name = "%s_%s_job_%d" % (self.batch_name, self.job_timestamp, tid)
+            job_name = "%s_%s_tid_%d" % (self.batch_name, self.job_timestamp, tid)
             job_names.append(job_name)
             cmd_args = self.command(
                     self.command._formatter(spec),
                     tid, self._launchinfo)
 
-            popen_args = self.qsub_args([("-e",error_dir), ('-N',job_name), ("-o",output_dir)],
+            popen_args = self._qsub_args([("-e",error_dir), ('-N',job_name), ("-o",output_dir)],
                                         cmd_args)
             p = subprocess.Popen(popen_args, stdout=subprocess.PIPE)
             (stdout, stderr) = p.communicate()
@@ -696,54 +705,9 @@ class QLauncher(Launcher):
             processes.append(p)
 
         self.message("Invoked qsub for %d commands" % len(processes))
-        if self.reduction_fn is not None:
-            self.qsub_collate_and_launch(output_dir, error_dir, job_names)
+        if (self.reduction_fn is not None) or self.dynamic:
+            self._qsub_collate_and_launch(output_dir, error_dir, job_names)
 
-    def dynamic_qsub(self, output_dir, error_dir, tid_specs):
-        """
-        This method handles dynamic argument specifiers where the
-        dynamic argument specifier can be queued before the arguments
-        are computed.
-        """
-
-        # Write out the specification files in anticipation of execution
-        for (tid, spec) in tid_specs:
-            self.command.specify(
-                    self.command._formatter(spec),
-                    tid, self._launchinfo)
-
-        # If schedule is empty (or on first initialization)...
-        if (self.schedule == []) or (self.schedule is None):
-            self.schedule = self.args.schedule()
-            assert len(tid_specs)== self.schedule[0], "Number of specs don't match schedule!"
-
-            # Generating the scheduled tasks (ie the queue commands)
-            collate_name = None
-            for batch_size in self.schedule:
-                schedule_tids = [tid + self.last_scheduled_tid for tid in range(batch_size) ]
-                schedule_tasks = [(tid, self.command.queue(tid, self._launchinfo)) for
-                                      tid in schedule_tids]
-
-                # Queueing with the scheduled tasks with appropriate job id dependencies
-                hold_jid_cmd = []
-                group_names = []
-
-                for (tid, schedule_task) in schedule_tasks:
-                    job_name = "%s_%s_job_%d" % (self.batch_name, self.job_timestamp, tid)
-                    overrides = [("-e",error_dir), ('-N',job_name), ("-o",output_dir)]
-                    if collate_name is not None: overrides += [('-hold_jid', collate_name)]
-                    popen_args = self.qsub_args(overrides, schedule_task)
-                    p = subprocess.Popen(popen_args, stdout=subprocess.PIPE)
-                    (stdout, stderr) = p.communicate()
-                    group_names.append(job_name)
-
-                collate_name = self.qsub_collate_and_launch(output_dir,
-                                                            error_dir,
-                                                            group_names)
-                self.last_scheduled_tid += batch_size
-
-            # Popping the currently specified tasks off the schedule
-            self.schedule = self.schedule[1:]
 
     def qdel_batch(self):
         """
@@ -924,14 +888,9 @@ class review_and_launch(core.PrettyPrinted, param.Parameterized):
                                       default='n')
 
         args = launcher.args
-        isdynamic = (isinstance(launcher, QLauncher)
-                     and launcher.is_dynamic_qsub)
-
         if response == 'quit': return False
-        elif response == 'y' and not isdynamic:
+        elif response == 'y':
             command.show(args)
-        elif response == 'y' and isdynamic:
-            command.show(args, queue_cmd_only=True)
         elif response == 'save':
             fname = input('Filename: ').replace(' ','_')
             with open(os.path.abspath(fname),'w') as f:
