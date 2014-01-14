@@ -2,7 +2,7 @@
 # Work in progress. Only SimpleOptimization is currently available.
 #
 
-import os, sys, json, time, fnmatch, pipes, subprocess
+import os, json, fnmatch
 import param
 from lancet.core import Arguments, Concatenate, CartesianProduct
 
@@ -261,7 +261,7 @@ class SimpleGradientDescent(DynamicArgs):
         if self._termination_info:
             (success, best_val, arg) = self._termination_info
             condition =  'Successfully converged.' if success else 'Maximum step limit reached.'
-            print("%s Minimum value %r found at argmin %r." % (condition, best_val, arg))
+            print("%s Minimum value of %r at %s=%r." % (condition, best_val, self.key, arg))
 
     def __len__(self):
         return 2*self.max_steps # Each step specifies 2 concurrent jobs
